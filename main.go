@@ -94,26 +94,6 @@ func GetClusterArns(svc *ecs.ECS, clusters []string) ([]string, error) {
 	return clusterArns, nil
 }
 
-// GetClusters retrieves a list of *ClusterArns from Amazon ECS,
-// dealing with the mandatory pagination as needed.
-func GetClusters(svc *ecs.ECS) (*ecs.ListClustersOutput, error) {
-	input := &ecs.ListClustersInput{}
-	output := &ecs.ListClustersOutput{}
-	for {
-		req := svc.ListClustersRequest(input)
-		myoutput, err := req.Send()
-		if err != nil {
-			return nil, err
-		}
-		output.ClusterArns = append(output.ClusterArns, myoutput.ClusterArns...)
-		if output.NextToken == nil {
-			break
-		}
-		input.NextToken = output.NextToken
-	}
-	return output, nil
-}
-
 // AugmentedTask represents an ECS task augmented with an extra set of
 // structures representing the ECS task definition and EC2 instance
 // associated with the running task.
@@ -574,7 +554,6 @@ func main() {
 
 	work := func() {
 		clusterArns, err := GetClusterArns(svc, strings.Split(*clusterNames, ","))
-		// clusters, err := GetClusters(svc)
 		if err != nil {
 			logError(err)
 			return
