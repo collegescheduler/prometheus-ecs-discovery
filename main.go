@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +45,7 @@ type labels struct {
 	MetricsPath   string `yaml:"__metrics_path__,omitempty"`
 }
 
+var clusterNames = flag.String("config.ecs-clusters", "", "Names of ECS cluster, comma-separated to inspect")
 var outFile = flag.String("config.write-to", "ecs_file_sd.yml", "path of file to write ECS service discovery information to")
 var interval = flag.Duration("config.scrape-interval", 60*time.Second, "interval at which to scrape the AWS API for ECS service discovery information")
 var times = flag.Int("config.scrape-times", 0, "how many times to scrape before exiting (0 = infinite)")
@@ -75,6 +77,21 @@ func logError(err error) {
 			log.Println(err.Error())
 		}
 	}
+}
+
+// GetClusterArns gets clusters arns
+func GetClusterArns(svc *ecs.ECS, clusters []string) ([]string, error) {
+	input := &ecs.DescribeClustersInput{Clusters: clusters}
+	req := svc.DescribeClustersRequest(input)
+	resp, err := req.Send()
+	if err != nil {
+		return nil, err
+	}
+	var clusterArns []string
+	for _, c := range resp.Clusters {
+		clusterArns = append(clusterArns, *c.ClusterArn)
+	}
+	return clusterArns, nil
 }
 
 // GetClusters retrieves a list of *ClusterArns from Amazon ECS,
@@ -533,6 +550,12 @@ func GetAugmentedTasks(svc *ecs.ECS, svcec2 *ec2.EC2, clusterArns []*string) ([]
 func main() {
 	flag.Parse()
 
+	if *clusterNames == "" {
+		fmt.Println("config.ecs-clusters is required")
+		flag.PrintDefaults()
+		os.Exit(1)
+	}
+
 	config, err := external.LoadDefaultAWSConfig()
 	if err != nil {
 		logError(err)
@@ -550,12 +573,13 @@ func main() {
 	svcec2 := ec2.New(config)
 
 	work := func() {
-		clusters, err := GetClusters(svc)
+		clusterArns, err := GetClusterArns(svc, strings.Split(*clusterNames, ","))
+		// clusters, err := GetClusters(svc)
 		if err != nil {
 			logError(err)
 			return
 		}
-		tasks, err := GetAugmentedTasks(svc, svcec2, StringToStarString(clusters.ClusterArns))
+		tasks, err := GetAugmentedTasks(svc, svcec2, StringToStarString(clusterArns))
 		if err != nil {
 			logError(err)
 			return
