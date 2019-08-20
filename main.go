@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -64,8 +65,6 @@ func logError(err error) {
 			switch aerr.Code() {
 			case ecs.ErrCodeServerException:
 				log.Println(ecs.ErrCodeServerException, aerr.Error())
-			case ecs.ErrCodeClientException:
-				log.Println(ecs.ErrCodeClientException, aerr.Error())
 			case ecs.ErrCodeInvalidParameterException:
 				log.Println(ecs.ErrCodeInvalidParameterException, aerr.Error())
 			case ecs.ErrCodeClusterNotFoundException:
@@ -80,10 +79,10 @@ func logError(err error) {
 }
 
 // GetClusterArns gets clusters arns
-func GetClusterArns(svc *ecs.ECS, clusters []string) ([]string, error) {
+func GetClusterArns(svc *ecs.Client, clusters []string) ([]string, error) {
 	input := &ecs.DescribeClustersInput{Clusters: clusters}
 	req := svc.DescribeClustersRequest(input)
-	resp, err := req.Send()
+	resp, err := req.Send(context.Background())
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +252,7 @@ func (t *AugmentedTask) ExporterInformation() []*PrometheusTaskInfo {
 
 // AddTaskDefinitionsOfTasks adds to each Task the TaskDefinition
 // corresponding to it.
-func AddTaskDefinitionsOfTasks(svc *ecs.ECS, taskList []*AugmentedTask) ([]*AugmentedTask, error) {
+func AddTaskDefinitionsOfTasks(svc *ecs.Client, taskList []*AugmentedTask) ([]*AugmentedTask, error) {
 	task2def := make(map[string]*ecs.TaskDefinition)
 	for _, task := range taskList {
 		task2def[*task.TaskDefinitionArn] = nil
@@ -261,7 +260,7 @@ func AddTaskDefinitionsOfTasks(svc *ecs.ECS, taskList []*AugmentedTask) ([]*Augm
 
 	jobs := make(chan *ecs.DescribeTaskDefinitionInput, len(task2def))
 	results := make(chan struct {
-		out *ecs.DescribeTaskDefinitionOutput
+		out *ecs.DescribeTaskDefinitionResponse
 		err error
 	}, len(task2def))
 
@@ -269,9 +268,9 @@ func AddTaskDefinitionsOfTasks(svc *ecs.ECS, taskList []*AugmentedTask) ([]*Augm
 		go func() {
 			for in := range jobs {
 				req := svc.DescribeTaskDefinitionRequest(in)
-				out, err := req.Send()
+				out, err := req.Send(context.Background())
 				results <- struct {
-					out *ecs.DescribeTaskDefinitionOutput
+					out *ecs.DescribeTaskDefinitionResponse
 					err error
 				}{out, err}
 			}
@@ -318,7 +317,7 @@ func StringToStarString(s []string) []*string {
 // DescribeInstancesUnpaginated describes a list of EC2 instances.
 // It is unpaginated because the API function does not require
 // pagination.
-func DescribeInstancesUnpaginated(svc *ec2.EC2, instanceIds []string) ([]ec2.Instance, error) {
+func DescribeInstancesUnpaginated(svc *ec2.Client, instanceIds []string) ([]ec2.Instance, error) {
 	if len(instanceIds) == 0 {
 		return nil, nil
 	}
@@ -329,7 +328,7 @@ func DescribeInstancesUnpaginated(svc *ec2.EC2, instanceIds []string) ([]ec2.Ins
 	finalOutput := &ec2.DescribeInstancesOutput{}
 	for {
 		req := svc.DescribeInstancesRequest(input)
-		output, err := req.Send()
+		output, err := req.Send(context.Background())
 		if err != nil {
 			return nil, err
 		}
@@ -351,7 +350,7 @@ func DescribeInstancesUnpaginated(svc *ec2.EC2, instanceIds []string) ([]ec2.Ins
 
 // AddContainerInstancesToTasks adds to each Task the EC2 instance
 // running its containers.
-func AddContainerInstancesToTasks(svc *ecs.ECS, svcec2 *ec2.EC2, taskList []*AugmentedTask) ([]*AugmentedTask, error) {
+func AddContainerInstancesToTasks(svc *ecs.Client, svcec2 *ec2.Client, taskList []*AugmentedTask) ([]*AugmentedTask, error) {
 
 	clusterArnToContainerInstancesArns := make(map[string]map[string]*ecs.ContainerInstance)
 	for _, task := range taskList {
@@ -374,7 +373,7 @@ func AddContainerInstancesToTasks(svc *ecs.ECS, svcec2 *ec2.EC2, taskList []*Aug
 			ContainerInstances: keys,
 		}
 		req := svc.DescribeContainerInstancesRequest(input)
-		output, err := req.Send()
+		output, err := req.Send(context.Background())
 		if err != nil {
 			return nil, err
 		}
@@ -427,7 +426,7 @@ func AddContainerInstancesToTasks(svc *ecs.ECS, svcec2 *ec2.EC2, taskList []*Aug
 }
 
 // GetTasksOfClusters returns the EC2 tasks running in a list of Clusters.
-func GetTasksOfClusters(svc *ecs.ECS, svcec2 *ec2.EC2, clusterArns []*string) ([]ecs.Task, error) {
+func GetTasksOfClusters(svc *ecs.Client, svcec2 *ec2.Client, clusterArns []*string) ([]ecs.Task, error) {
 	jobs := make(chan *string, len(clusterArns))
 	results := make(chan struct {
 		out *ecs.DescribeTasksOutput
@@ -444,7 +443,7 @@ func GetTasksOfClusters(svc *ecs.ECS, svcec2 *ec2.EC2, clusterArns []*string) ([
 				var err error
 				for {
 					req := svc.ListTasksRequest(input)
-					output, err1 := req.Send()
+					output, err1 := req.Send(context.Background())
 					if err1 != nil {
 						err = err1
 						log.Printf("Error listing tasks of cluster %s: %s", *clusterArn, err)
@@ -458,7 +457,7 @@ func GetTasksOfClusters(svc *ecs.ECS, svcec2 *ec2.EC2, clusterArns []*string) ([
 						Cluster: clusterArn,
 						Tasks:   output.TaskArns,
 					})
-					descOutput, err2 := reqDescribe.Send()
+					descOutput, err2 := reqDescribe.Send(context.Background())
 					if err2 != nil {
 						err = err2
 						log.Printf("Error describing tasks of cluster %s: %s", *clusterArn, err)
@@ -504,7 +503,7 @@ func GetTasksOfClusters(svc *ecs.ECS, svcec2 *ec2.EC2, clusterArns []*string) ([
 
 // GetAugmentedTasks gets the fully AugmentedTasks running on
 // a list of Clusters.
-func GetAugmentedTasks(svc *ecs.ECS, svcec2 *ec2.EC2, clusterArns []*string) ([]*AugmentedTask, error) {
+func GetAugmentedTasks(svc *ecs.Client, svcec2 *ec2.Client, clusterArns []*string) ([]*AugmentedTask, error) {
 	simpleTasks, err := GetTasksOfClusters(svc, svcec2, clusterArns)
 	if err != nil {
 		return nil, err
