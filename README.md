@@ -11,6 +11,7 @@ Run `prometheus-ecs-discovery --help` to get information.
 
 The command line parameters that can be used are:
 
+* -config.cluster (string): the name of a cluster to scrape (defaults to scraping all clusters)
 * -config.scrape-interval (duration): interval at which to scrape
   the AWS API for ECS service discovery information (default 1m0s)
 * -config.scrape-times (int): how many times to scrape before
@@ -21,8 +22,11 @@ The command line parameters that can be used are:
   the AWS API (optional)
 * -config.server-name-label (string): Docker label to define the server name
   (default "PROMETHEUS_EXPORTER_SERVER_NAME")
+* -config.job-name-label (string): Docker label to define the job name
+  (default "PROMETHEUS_EXPORTER_JOB_NAME")
 * -config.path-label (string): Docker label to define the scrape path of the
   application (default "PROMETHEUS_EXPORTER_PATH")
+* -config.filter-label (string): docker label (and optional value) to filter on "NAME_OF_LABEL[=VALUE]".
 * -config.port-label (string): Docker label to define the scrape port of the application
   (if missing an application won't be scraped) (default "PROMETHEUS_EXPORTER_PORT")
 
@@ -57,12 +61,17 @@ scrape_configs:
     - files:
       - /path/to/ecs_file_sd.yml
       refresh_interval: 10m
+  # Drop unwanted labels using the labeldrop action
+  metric_relabel_configs:
+    - regex: task_arn
+      action: labeldrop
 ```
 
 To scrape the containers add following docker labels to them:
 
 * `PROMETHEUS_EXPORTER_PORT` specify the container port where prometheus scrapes (mandatory)
 * `PROMETHEUS_EXPORTER_SERVER_NAME` specify the hostname here, per default ip is used (optional)
+* `PROMETHEUS_EXPORTER_JOB_NAME` specify job name here (optional)
 * `PROMETHEUS_EXPORTER_PATH` specify alternative scrape path here (optional)
 
 That's it.  You should begin seeing the program scraping the

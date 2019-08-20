@@ -38,6 +38,7 @@ import (
 type labels struct {
 	TaskArn       string `yaml:"task_arn"`
 	TaskName      string `yaml:"task_name"`
+	JobName       string `yaml:"job,omitempty"`
 	TaskRevision  string `yaml:"task_revision"`
 	TaskGroup     string `yaml:"task_group"`
 	ClusterArn    string `yaml:"cluster_arn"`
@@ -54,7 +55,9 @@ var times = flag.Int("config.scrape-times", 0, "how many times to scrape before 
 var roleArn = flag.String("config.role-arn", "", "ARN of the role to assume when scraping the AWS API (optional)")
 var prometheusPortLabel = flag.String("config.port-label", "PROMETHEUS_EXPORTER_PORT", "Docker label to define the scrape port of the application (if missing an application won't be scraped)")
 var prometheusPathLabel = flag.String("config.path-label", "PROMETHEUS_EXPORTER_PATH", "Docker label to define the scrape path of the application")
+var prometheusFilterLabel = flag.String("config.filter-label", "", "Docker label (and optionally value) to require to scrape the application")
 var prometheusServerNameLabel = flag.String("config.server-name-label", "PROMETHEUS_EXPORTER_SERVER_NAME", "Docker label to define the server name")
+var prometheusJobNameLabel = flag.String("config.job-name-label", "PROMETHEUS_EXPORTER_JOB_NAME", "Docker label to define the job name")
 
 // logError is a convenience function that decodes all possible ECS
 // errors and displays them to standard error.
@@ -170,6 +173,11 @@ func (t *AugmentedTask) ExporterInformation() []*PrometheusTaskInfo {
 
 	}
 
+	var filter []string
+	if *prometheusFilterLabel != "" {
+		filter = strings.Split(*prometheusFilterLabel, "=")
+	}
+
 	for _, i := range t.Containers {
 		// Let's go over the containers to see which ones are defined
 		// and have a Prometheus exported port.
@@ -191,6 +199,18 @@ func (t *AugmentedTask) ExporterInformation() []*PrometheusTaskInfo {
 			// Nope, no Prometheus-exported port in this container def.
 			// This container is no good.  We continue.
 			continue
+		}
+
+		if len(filter) != 0 {
+			v, ok := d.DockerLabels[filter[0]]
+			if !ok {
+				// Nope, the filter label isn't present.
+				continue
+			}
+			if len(filter) == 2 && v != filter[1] {
+				// Nope, the filter label value doesn't match.
+				continue
+			}
 		}
 
 		var err error
@@ -230,6 +250,7 @@ func (t *AugmentedTask) ExporterInformation() []*PrometheusTaskInfo {
 		labels := labels{
 			TaskArn:       *t.TaskArn,
 			TaskName:      *t.TaskDefinition.Family,
+			JobName:       d.DockerLabels[*prometheusJobNameLabel],
 			TaskRevision:  fmt.Sprintf("%d", *t.TaskDefinition.Revision),
 			TaskGroup:     *t.Group,
 			ClusterArn:    *t.ClusterArn,
@@ -315,6 +336,21 @@ func StringToStarString(s []string) []*string {
 	return c
 }
 
+// SplitArray splits given array into chunks, it's usefull
+// because AWS API has limits on number of elements you can
+// submit via one call.
+func SplitArray(a []string, size int) [][]string {
+	var splitted [][]string
+	for i := 0; i < len(a); i += size {
+		end := i + size
+		if end > len(a) {
+			end = len(a)
+		}
+		splitted = append(splitted, a[i:end])
+	}
+	return splitted
+}
+
 // DescribeInstancesUnpaginated describes a list of EC2 instances.
 // It is unpaginated because the API function does not require
 // pagination.
@@ -322,23 +358,25 @@ func DescribeInstancesUnpaginated(svc *ec2.Client, instanceIds []string) ([]ec2.
 	if len(instanceIds) == 0 {
 		return nil, nil
 	}
-
-	input := &ec2.DescribeInstancesInput{
-		InstanceIds: instanceIds,
-	}
 	finalOutput := &ec2.DescribeInstancesOutput{}
-	for {
-		req := svc.DescribeInstancesRequest(input)
-		output, err := req.Send(context.Background())
-		if err != nil {
-			return nil, err
+	splittedInstanceIds := SplitArray(instanceIds, 100)
+	for _, chunkedInstanceIds := range splittedInstanceIds {
+		input := &ec2.DescribeInstancesInput{
+			InstanceIds: chunkedInstanceIds,
 		}
-		log.Printf("Described %d EC2 reservations", len(output.Reservations))
-		finalOutput.Reservations = append(finalOutput.Reservations, output.Reservations...)
-		if output.NextToken == nil {
-			break
+		for {
+			req := svc.DescribeInstancesRequest(input)
+			output, err := req.Send(context.Background())
+			if err != nil {
+				return nil, err
+			}
+			log.Printf("Described %d EC2 reservations", len(output.Reservations))
+			finalOutput.Reservations = append(finalOutput.Reservations, output.Reservations...)
+			if output.NextToken == nil {
+				break
+			}
+			input.NextToken = output.NextToken
 		}
-		input.NextToken = output.NextToken
 	}
 	result := []ec2.Instance{}
 	for _, rsv := range finalOutput.Reservations {
@@ -369,23 +407,27 @@ func AddContainerInstancesToTasks(svc *ecs.Client, svcec2 *ec2.Client, taskList 
 		for k := range containerInstancesArns {
 			keys = append(keys, k)
 		}
-		input := &ecs.DescribeContainerInstancesInput{
-			Cluster:            &clusterArn,
-			ContainerInstances: keys,
-		}
-		req := svc.DescribeContainerInstancesRequest(input)
-		output, err := req.Send(context.Background())
-		if err != nil {
-			return nil, err
-		}
 
-		if len(output.Failures) > 0 {
-			log.Printf("Described %d failures in cluster %s", len(output.Failures), clusterArn)
-		}
-		for _, ci := range output.ContainerInstances {
-			cInst := ci
-			clusterArnToContainerInstancesArns[clusterArn][*cInst.ContainerInstanceArn] = &cInst
-			instanceIDToEC2Instance[*cInst.Ec2InstanceId] = nil
+		splittedKeys := SplitArray(keys, 100)
+		for _, chunkedKeys := range splittedKeys {
+			input := &ecs.DescribeContainerInstancesInput{
+				Cluster:            &clusterArn,
+				ContainerInstances: chunkedKeys,
+			}
+			req := svc.DescribeContainerInstancesRequest(input)
+			output, err := req.Send(context.Background())
+			if err != nil {
+				return nil, err
+			}
+
+			if len(output.Failures) > 0 {
+				log.Printf("Described %d failures in cluster %s", len(output.Failures), clusterArn)
+			}
+			for _, ci := range output.ContainerInstances {
+				cInst := ci
+				clusterArnToContainerInstancesArns[clusterArn][*cInst.ContainerInstanceArn] = &cInst
+				instanceIDToEC2Instance[*cInst.Ec2InstanceId] = nil
+			}
 		}
 	}
 	if len(instanceIDToEC2Instance) == 0 {
@@ -554,6 +596,7 @@ func main() {
 	svcec2 := ec2.New(config)
 
 	work := func() {
+
 		clusterArns, err := GetClusterArns(svc, strings.Split(*clusterNames, ","))
 		if err != nil {
 			logError(err)
