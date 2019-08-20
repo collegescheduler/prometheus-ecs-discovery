@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/awserr"
 	"github.com/aws/aws-sdk-go-v2/aws/external"
 	"github.com/aws/aws-sdk-go-v2/aws/stscreds"
@@ -536,6 +537,7 @@ func main() {
 	}
 
 	config, err := external.LoadDefaultAWSConfig()
+	config.LogLevel = aws.LogDebugWithHTTPBody
 	if err != nil {
 		logError(err)
 		return
